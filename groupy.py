@@ -1,276 +1,245 @@
 import numpy as np
 from itertools import product
+# unsure if this is good practice but it gets the job done
+import inspect
 
-'''
-Bank of finite groups G <= O(n) of order k represented by functions which take X (pxn) to a new matrix
-[G_1x, ..., G_kx] (px(kn))
-Should probably be methods of a groups class or something cleaner tbh
-'''
+class GroupAction:
+    '''
+    Takes in a group function that gives every matrix in the representation of a finite group along with
+        the dimension of the representation. Also takes in the args for the given group representation.
+    Stores a represention of a finite group
+    Stores rep. matrices, can act on data to give orbits, can compute Frechet means, can take data in R^n and
+        sramble the data considered in the quotient space given by the rep
+    '''
+    def __init__(self, group, dim, *args, **kwargs):
+        self.group = group
+        self.args = args
+        self.kwargs = kwargs
+        self.dim = dim
+        self.name = self.group.__name__
+        # stores the group matrices as a |G|xdxd np array
+        self.matrices = np.stack(self.group(dim, *self.args, **self.kwargs), axis = 0)
+        self.order = len(self.matrices)
 
-# cyclic translation
-def Greps_Cyclic(x):
-    p = len(x)
-    Xreps = []
-    # cyclic translation group generator
-    C = np.eye(p)[:, np.append(np.arange(1,p),0)]
-    for j in range(p):
-        Cj = np.linalg.matrix_power(C, j)
-        Xreps.append(np.dot(Cj, x))
-    return np.hstack(Xreps)
+    def get_orbits(self, X):
+        '''
+        Takes in dxn dataset in R^n and returns a new |G|xdxn consisting of the
+            orbit of each point under the ith elements group action as [i, :, :]
+        '''
+        return self.matrices@X
 
-# inverting sign
-def Greps_pmId(x):
-    Xreps = [x, -x]
-    return np.hstack(Xreps)
+    def __repr__(self):
+        return f"Group: {self.name}, with args [{self.args}, {self.kwargs}]."
 
-# reflect along hyperplane orthogonal to y
-def Greps_Reflect(x, y = None):
-    p = len(x)
-    # if not specified reflect about x_n axis
-    if y is None:
-        y = np.zeros(p)
-        y[-1] = 1
-    # householder reflector
-    R = np.eye(p) - 2*np.outer(y,y)/np.linalg.norm(y)**2
-    Xreps = [x, np.dot(R,x)]
-    return np.hstack(Xreps)
+    def Frechet(self, X):
+        '''
+        Combinatorial brute force computation of Karcher means given a dataset X (pxn). Decently optimized :)
+        '''
+        d, n = X.shape
+        k = self.order
+        GX = self.get_orbits(X)
 
-# # cylic group of rotations of order n (about the first two coordinates)
-# def Greps_Rotate(x, n = 3):
-#     Xreps = []
-#     p = len(x)
-#     theta = (2*np.pi)/n
-#     R = np.eye(p)
-#     # Define the 2x2 rotation matrix for the given theta
-#     rotation_submatrix = np.array([[np.cos(theta), -np.sin(theta)],
-#                                    [np.sin(theta),  np.cos(theta)]])
-#     R[0:2, 0:2] = rotation_submatrix
+        # init values
+        obj_value = np.inf
+        aligned_data = X
+        frechet_mean = None
 
-#     for j in range(n):
-#         Rj = np.linalg.matrix_power(R, j)
-#         Xreps.append(np.dot(Rj, x))
-#     return np.hstack(Xreps)
+        # For each combination (g_2, ..., g_n)
+        # We choose g_1 to always be fixed to reduce computation time
+        for comb in product(range(k), repeat=n-1):
+            dataset_rep = GX[(0,) + comb, :, np.arange(n)].T
+            u = np.mean(dataset_rep, axis=1)
+            variance = np.sum((dataset_rep.T-u)**2)
 
-# creates matrix where block diagonal is 2x2 rotation matrices R_i of order n[i]
-def Greps_Rotate(x, n):
-    Xreps = []
-    p = len(x)
-    half_p = p // 2
-    R = np.eye(p)
+            # update optimal values when a better variance is found (only store best in memory)
+            if variance < obj_value:
+                frechet_mean, aligned_data, obj_value = u, dataset_rep, variance
 
-    if len(n) > half_p:
-        print("Warning: more rotations than p//2 inputted")
+        return frechet_mean, obj_value, aligned_data
 
-    # Construct block-diagonal rotation matrices for each block
-    for i in range(half_p):
-        if n[i] > 1:
-            theta = (2 * np.pi) / n[i]
-            rotation_submatrix = np.array([[np.cos(theta), -np.sin(theta)],
-                                           [np.sin(theta),  np.cos(theta)]])
-            R[2*i:2*i+2, 2*i:2*i+2] = rotation_submatrix
+    def IterativeFrechet(self, X, u = None):
+        '''
+        Function to iteratively find the Frechet mean of a set of n data points acted on by a group G
+        Follows the "max-max" algorithm in
+        "Inconsistency of Template Estimation by Minimizing of the Variance/Pre-Variance in the Quotient Space"
+        Always converges in finitely many steps if G acts transitively on R^n
+        '''
+        d, n = X.shape
+        GX = self.get_orbits(X)
+        k = self.order
 
-    # Apply rotations with different powers for each block and accumulate results
-    max_n = max([n[i] for i in range(half_p)])
-    for j in range(max_n):
-        Rj = np.linalg.matrix_power(R, j)
-        Xreps.append(np.dot(Rj, x))
+        # initialize frechet mean guess as a random pt in X
+        if u is None:
+            u = X[:, np.random.randint(n)]
 
-    return np.hstack(Xreps)
+        niter = 0
+        while True:
+            # (kxn) array where D[i,:] are the distances between each g_iX and u
+            D = np.sum((GX -  u[None, :, None])**2,axis=1)  # Shape (k, n)
+            # find optimal orbit point for each x_i
+            closest_indices = np.argmin(D, axis=0)
+            # create (dxn) array of X_i under optimal alignment wrt u
+            dataset_rep = GX[closest_indices, :, np.arange(n)].T
+            u_new = np.mean(dataset_rep, axis = 1)
 
-# group w/ reflections about xy, xz planes and a pi-rotation about (1,1,1) ONLY FOR R3
-def Greps_2R1R(x):
-    Xreps = []
-    R = (1/3) * np.array([[-1, 2, 2],
-                          [2, -1, 2],
-                          [2, 2, -1]])
-    XY = np.array([[1, 0, 0],
-                   [0, 1, 0],
-                   [0, 0, -1]])
-    XZ = np.array([[1, 0, 0],
-                   [0, -1, 0],
-                   [0, 0, 1]])
-    # manually get all 8 group reps
-    Xreps.append(np.dot(np.eye(3), x))
-    Xreps.append(np.dot(R, x))
-    Xreps.append(np.dot(XY, x))
-    Xreps.append(np.dot(XZ, x))
-    Xreps.append(np.dot(R@XY, x))
-    Xreps.append(np.dot(R@XZ, x))
-    Xreps.append(np.dot(XY@XZ, x))
-    Xreps.append(np.dot(R@XY@XZ, x))
-    return np.hstack(Xreps)
+            if np.all(u == u_new):
+                break
 
-# two reflections, ONLY FOR R2
-def Greps_2refl2d(x):
-    X1 = np.array([[-1,0], [0,1]])
-    X2 = np.array([[1,0], [0,-1]])
-    X3 = np.array([[-1,0], [0,-1]])
+            niter += 1
+            u = u_new
 
-    Xreps = [x, X1@x, X2@x, X3@x]
-    return np.hstack(Xreps)
+        return u, dataset_rep, niter
 
-# rotation in each 2x2 subspace, ONLY FOR R3
-def Greps_4rots(x):
-    X1 = np.array([[-1,0, 0], [0, -1, 0], [0, 0, 1]])
-    X2 = np.array([[1,0, 0], [0,-1, 0], [0, 0, -1]])
-    X3 = np.array([[-1,0, 0], [0,1, 0], [0,0, -1]])
+    def FrechetGD(self, X, u=None, alpha = 1, niter = 100):
+        '''
+        Function to iteratively find the Frechet mean of a set of n data points acted on by a group G
+        alpha = 1 is identical to IterativeFrechet
+        Performs direct gradient descent on the data with fixed learning rate
+        May not converge even for transitive group actions for general alpha
+        '''
+        d, n = X.shape
+        GX = self.get_orbits(X)
+        k = self.order
 
-    Xreps = [x, X1@x, X2@x, X3@x]
-    return np.hstack(Xreps)
+        # initialize frechet mean guess as a random pt in X
+        if u is None:
+            u = X[:, np.random.randint(n)]
 
-'''
-Combinatorial brute force computation of Karcher means given a dataset X (n by p) and Greps describing
-    the orbit of a point x under G
-'''
-def Frechet(X, G):
-    p, n = X.shape
-    GX = G(X)
-    k = GX.shape[1]//n
+        for i in range(niter):
+            # (kxn) array where D[i,:] are the distances between each g_iX and u
+            D = np.sum((GX -  u[None, :, None])**2,axis=1)  # Shape (k, n)
+            # find optimal orbit point for each x_i
+            closest_indices = np.argmin(D, axis=0)
+            # create (dxn) array of X_i under optimal alignment wrt u
+            dataset_rep = GX[closest_indices, :, np.arange(n)].T
+            u_new = np.mean(dataset_rep, axis = 1)
 
-    # Split GX into a list of k blocks, each of shape (p, n)
-    GX_blocks = np.hsplit(GX, k)
+            # gradF = u - u_new
+            u = u - alpha*(u - u_new)
 
-    # combinations of g elements
-    combinations = product(range(k), repeat=n)
-    means =  []
-    distances = []
-    frames = []
+        return u, dataset_rep
 
-    # For each combination (g_1, ..., g_n)
-    for combo in combinations:
-        frame = np.zeros((p, n))
-        for i, g in enumerate(combo):
-            # pull submatrix corresponding to combo-indexed g-tuple on X
-            # I think this can be improved by creating n! G-tensors to act on X rather than building section col by col
-            frame[:, i] = GX_blocks[g][:, i]
+    def align(self, X, x):
+        '''
+        Takes in a dxn dataset and returns a dxn dataset whose columns are the columns of X, x_i, acted on
+            such that the distance between each x_i and x is minimized
 
-        u = np.mean(frame, axis=1)
-        means.append(u)
-        dist = np.sum((frame.T-u)**2)
-        distances.append(dist)
-        frames.append(frame)
-
-    j = np.argmin(distances)
-    frechet = means[j]
-    optimal_framing = frames[j]
-
-    return frechet, optimal_framing
-
-'''
-Function to iteratively find the Frechet mean of a set of n data points acted on by a group G
-Follows the "max-max" algorithm in
-"Inconsistency of Template Estimation by Minimizing of the Variance/Pre-Variance in the Quotient Space"
-Always converges in finitely many steps if G acts transitively on R^n
-'''
-def IterativeFrechet(X, G, u = None):
-    p, n = X.shape
-    GX = G(X)
-    k = GX.shape[1]//n
-
-    # initialize frechet mean guess
-    if u is None:
-        u = np.random.random(p)
-
-    # split X into g orbits
-    GX_blocks = np.hsplit(GX, k)
-
-    niter = 0
-
-    while True:
-        frame = np.zeros([p,n])
-        # (kxn) array where D[i,:] are the distances between each g_iX and u
-        D = np.array([np.sum((GX_block.T - u)**2, axis=1) for GX_block in GX_blocks])  # Shape (k, n)
+        Note: Not called in Frechet mean methods since GX would then be computed every iteration
+        '''
+        GX = self.get_orbits(X)
+        # (kxn) array where D[i,:] are the distances between each g_iX and x
+        D = np.sum((GX -  x[None, :, None])**2,axis=1)  # Shape (k, n)
         # find optimal orbit point for each x_i
         closest_indices = np.argmin(D, axis=0)
-        # create (pxn) array of X_i under optimal framing wrt u
-        frame = np.array([GX_blocks[closest_indices[i]][:, i] for i in range(n)])
-        u_new = np.mean(frame, axis = 0)
+        # create (dxn) array of X_i under optimal alignment wrt u
+        aligned_data = GX[closest_indices, :, np.arange(X.shape[1])].T
+        return aligned_data
 
-        if np.all(u == u_new):
-            break
+    def FrechetFunctional(self, X, x):
+        '''
+        Returns the value of the Frechet functional (variance) of X at the point x
+        '''
+        aligned_X = self.align(X,x)
+        print(aligned_X)
+        return np.sum((aligned_X.T-x)**2)
 
-        niter += 1
-        u = u_new
+    def squared_dist(self, x, y):
+        '''
+        Takes in two (d,) arrays and computes the squared quotient distance
+        '''
+        return()
 
-    return u, frame.T, niter
+# ─── Group matrix constructors ────────────────────────────────────────────────
+# functions that generate list of all matrices in a finite group
 
-'''
-Function to iteratively find the Frechet mean of a set of n data points acted on by a group G
-alpha = 1 is identical to IterativeFrechet
-Performs direct gradient descent on the data with fixed learning rate
-May not converge even for transitive group actions for general alpha
-'''
-def FrechetGD(X, G, u, alpha = 1, niter = 100):
-    p, n = X.shape
-    GX = G(X)
-    k = GX.shape[1]//n
-    # split X into g orbits
-    GX_blocks = np.hsplit(GX, k)
+def cyclic_translations(d):
+    '''
+    Returns the d cyclic permutation matrices
+    '''
+    C = np.eye(d)[:, np.append(np.arange(1, d), 0)]
+    return [np.linalg.matrix_power(C, j) for j in range(d)]
 
-    for i in range(niter):
-        frame = np.zeros([p,n])
-        # (kxn) array where D[i,:] are the distances between each g_iX and u
-        D = np.array([np.sum((GX_block.T - u)**2, axis=1) for GX_block in GX_blocks])  # Shape (k, n)
-        # find optimal orbit point for each x_i
-        closest_indices = np.argmin(D, axis=0)
-        # create (pxn) array of X_i under optimal framing wrt u
-        frame = np.array([GX_blocks[closest_indices[i]][:, i] for i in range(n)])
-        iteration_mean = np.mean(frame, axis = 0)
+def pmId(d):
+    '''
+    Z2 acting as sign change in every dimension
+    '''
+    I = np.eye(d)
+    return [I, -I]
 
-        gradF = u - iteration_mean
-        u = u - alpha*gradF
+def reflection(d, axis=None):
+    '''
+    Householder reflection matrix about hyperplane perp to the given axis
+    '''
+    if axis is None:
+        axis = np.zeros(d)
+        axis[-1] = 1
+    R = np.eye(d) - 2 * np.outer(axis, axis) / np.dot(axis, axis)
+    return [np.eye(d), R]
 
-    return u, frame.T
+def rotations(d, orders):
+    '''
+    Gives an element of SO(d) in canonical form by order d (finite)
+    rotations on the 2x2 subspaces
+    '''
+    m = d // 2
+    R = np.eye(d)
+    for i, n in enumerate(orders[:m]):
+        if n > 1:
+            theta = 2 * np.pi / n
+            R[2*i:2*i+2, 2*i:2*i+2] = [
+                [np.cos(theta), -np.sin(theta)],
+                [np.sin(theta),  np.cos(theta)],
+            ]
+    max_power = np.lcm.reduce([n for n in orders[:m] if n > 1], initial=1)
+    return [np.linalg.matrix_power(R, k) for k in range(max_power)]
 
-def FrechetFunctional(x, X, G):
-    p, n = X.shape
-    GX = G(X)
-    k = GX.shape[1]//n
-    # split X into g orbits
-    GX_blocks = np.hsplit(GX, k)
+def diagonal_sign(d):
+    """
+    All 2^d diagonal matrices with ±1 on the diagonal. Reflection group
+    """
+    mats = []
+    for signs in product([1, -1], repeat=d):
+        mats.append(np.diag(signs))
+    return mats
 
-    frame = np.zeros([p,n])
-    # (kxn) array where D[i,:] are the distances^2 between each g_iX and u
-    D = np.array([np.sum((GX_block.T - x)**2, axis=1) for GX_block in GX_blocks])  # Shape (k, n)
-    # find optimal orbit point for each x_i
-    closest_indices = np.argmin(D, axis=0)
-    # create (pxn) array of X_i under optimal framing wrt u
-    frame = np.array([GX_blocks[closest_indices[i]][:, i] for i in range(n)])
-    # sum of squared distances
-    J = np.sum((frame - x)**2)
+def even_diagonal_sign(d):
+    """
+    Diagonal ±1 matrices with an even number of −1 entries,
+    i.e. det = +1.  Size = 2^(d-1).
+    NOT a reflection group, Z2 acting on 2 dim subspaces by +-Id
+    """
+    mats = []
+    for signs in product([1, -1], repeat=d):
+        if sum(s == -1 for s in signs) % 2 == 0:
+            mats.append(np.diag(signs))
+    return mats
 
-    return J
 
-# '''
-# Function to iteratively find the Frechet mean of a set of n data points acted on by a group G
-# alpha = 1 is identical to IterativeFrechet
-# Performs direct gradient descent on the data with fixed learning rate
-# May not converge even for transitive group actions for general alpha
-# '''
-# def FrechetSGD(X, G, u, alpha = 1, TOL = 1e-6):
-#     p, n = X.shape
-#     GX = G(X)
-#     k = GX.shape[1]//n
-#     # init
-#     u_new = np.random.random(p)
-#     # split X into g orbits
-#     GX_blocks = np.hsplit(GX, k)
+def dihedral_group(d, n, axes=(0, 1)):
+    """
+    Action of D_n (dihedral group) on R^d by acting on the 2D subspace spanned by
+    the first two dimensions. Acts as the natrual Dihedral group action on R^2
+    """
+    i, j = axes
+    mats = []
 
-#     while np.linalg.norm(u - u_new) > TOL:
-#         frame = np.zeros([p,n])
-#         u = u_new
-#         # (kxn) array where D[i,:] are the distances between each g_iX and u
-#         D = np.array([np.sum((GX_block.T - u)**2, axis=1) for GX_block in GX_blocks])  # Shape (k, n)
-#         # find optimal orbit point for each x_i
-#         closest_indices = np.argmin(D, axis=0)
-#         # create (pxn) array of X_i under optimal framing wrt u
-#         frame = np.array([GX_blocks[closest_indices[i]][:, i] for i in range(n)])
-#         iteration_mean = np.mean(frame, axis = 0)
+    for k in range(n):
+        θ = 2 * np.pi * k / n
+        # rotation in (i,j) plane
+        R = np.eye(d)
+        R[np.ix_((i, j), (i, j))] = [[np.cos(θ), -np.sin(θ)],
+                                     [np.sin(θ),  np.cos(θ)]]
+        mats.append(R)
 
-#         gradF = u - frame
-#         u_new = u - alpha*gradF
+        # reflection: flip j-axis after rotating
+        F = R.copy()
+        F[j, j] *= -1
+        mats.append(F)
 
-#     return u, frame.T
+    return mats
+
+
+# ─── Utility functions ────────────────────────────────────────────────
 
 # N points in R^p uniform in B(y,R)
 def generate_points_within_ball(N, p, R, y):
