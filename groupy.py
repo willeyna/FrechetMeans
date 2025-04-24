@@ -31,7 +31,7 @@ class GroupAction:
     def __repr__(self):
         return f"Group: {self.name}, with args [{self.args}, {self.kwargs}]."
 
-    def Frechet(self, X):
+    def frechet(self, X):
         '''
         Combinatorial brute force computation of Karcher means given a dataset X (pxn). Decently optimized :)
         '''
@@ -57,7 +57,7 @@ class GroupAction:
 
         return frechet_mean, obj_value, aligned_data
 
-    def IterativeFrechet(self, X, u = None):
+    def iterative_frechet(self, X, u = None):
         '''
         Function to iteratively find the Frechet mean of a set of n data points acted on by a group G
         Follows the "max-max" algorithm in
@@ -90,7 +90,7 @@ class GroupAction:
 
         return u, dataset_rep, niter
 
-    def FrechetGD(self, X, u=None, alpha = 1, niter = 100):
+    def frechet_gd(self, X, u=None, alpha = 1, niter = 100):
         '''
         Function to iteratively find the Frechet mean of a set of n data points acted on by a group G
         alpha = 1 is identical to IterativeFrechet
@@ -135,19 +135,47 @@ class GroupAction:
         aligned_data = GX[closest_indices, :, np.arange(X.shape[1])].T
         return aligned_data
 
-    def FrechetFunctional(self, X, x):
+    def frechet_functional(self, X, x):
         '''
         Returns the value of the Frechet functional (variance) of X at the point x
         '''
-        aligned_X = self.align(X,x)
-        print(aligned_X)
+        aligned_X = self.align(X, x)
         return np.sum((aligned_X.T-x)**2)
 
-    def squared_dist(self, x, y):
+    def dist(self, x, y):
         '''
-        Takes in two (d,) arrays and computes the squared quotient distance
+        Takes in two (d,) arrays and computes the *squared* quotient distance
         '''
-        return()
+
+        return self.frechet_functional(x.reshape(-1,1), y)
+
+    def is_alignable(self, X):
+        '''
+        Determines whether a dataset is alignable
+        Aligns the the first point in the dataset then iteratively checks whether quotient distances are the same
+            as euclidean distances after this alignment
+        '''
+        n = X.shape[1]
+        # align to a point, if alignable euc dist should be quotient dists
+        Y = self.align(X, X[:,0])
+        for i in range(n):
+            for j in range(i+1, n):
+                yi, yj = Y[:, i], Y[:, j]
+                if self.dist(yi, yj) != np.sum((yi-yj)**2):
+                    return False
+        return True
+
+    def randomize_reps(self, X):
+        '''
+        Takes in a dxn array and acts on each column by a random group element
+        Returns a dxn array with ith column (g_i * x_i)
+        '''
+        n = X.shape[1]
+        GX = self.get_orbits(X)
+        gi = np.random.randint(0, self.order, n)
+        dataset_rep = GX[gi, :, np.arange(n)].T
+
+        return dataset_rep
 
 # ─── Group matrix constructors ────────────────────────────────────────────────
 # functions that generate list of all matrices in a finite group
@@ -242,16 +270,20 @@ def dihedral_group(d, n, axes=(0, 1)):
 # ─── Utility functions ────────────────────────────────────────────────
 
 # N points in R^p uniform in B(y,R)
-def generate_points_within_ball(N, p, R, y):
+def sample_unif_ball(n, d, R=1, y=None):
+
+    if y is None:
+        y = np.zeros(d)
+
     # Ensure y is an array and reshape it for broadcasting
     y = np.array(y).reshape(-1, 1)  # Reshape y to (p, 1)
 
     # Generate random directions
-    directions = np.random.randn(p, N)
+    directions = np.random.randn(d, n)
     directions /= np.linalg.norm(directions, axis=0)
 
     # Generate random distances from the center within [0, R]
-    distances = np.random.rand(N) ** (1 / p) * R
+    distances = np.random.rand(n) ** (1 / d) * R
 
     # Scale directions by distances and add the center point y
     points = y + directions * distances
