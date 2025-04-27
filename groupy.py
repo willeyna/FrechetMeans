@@ -149,15 +149,20 @@ class GroupAction:
 
         return self.frechet_functional(x.reshape(-1,1), y)
 
-    def is_alignable(self, X):
+    def is_alignable(self, X, check_aligned = False):
         '''
         Determines whether a dataset is alignable
         Aligns the the first point in the dataset then iteratively checks whether quotient distances are the same
             as euclidean distances after this alignment
+        Final bool input checks alignment without first trying to pre-align (checks alignment instead of alignability)
         '''
         n = X.shape[1]
-        # align to a point, if alignable euc dist should be quotient dists
-        Y = self.align(X, X[:,0])
+        if not check_aligned:
+            # align to a point, if alignable euc dist should be quotient dists
+            Y = self.align(X, X[:,0])
+        else:
+            Y = X
+
         for i in range(n):
             for j in range(i+1, n):
                 yi, yj = Y[:, i], Y[:, j]
