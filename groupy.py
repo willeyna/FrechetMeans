@@ -1,4 +1,8 @@
 import numpy as np
+# used in kmeans SDP
+from sklearn.cluster import KMeans
+import cvxpy as cp
+#
 from itertools import product
 # unsure if this is good practice but it gets the job done
 import inspect
@@ -16,6 +20,7 @@ class GroupAction:
         self.args = args
         self.kwargs = kwargs
         self.dim = dim
+        self.custom_solver = None
         self.name = self.group.__name__
         # stores the group matrices as a |G|xdxd np array
         self.matrices = np.stack(self.group(dim, *self.args, **self.kwargs), axis = 0)
@@ -181,6 +186,113 @@ class GroupAction:
         dataset_rep = GX[gi, :, np.arange(n)].T
 
         return dataset_rep
+    
+    def kmeans(self, X, k, solver = 'iterative', max_iters=100, tol=1e-4):
+        """
+        Frechet kmeans using Lloyds algorithm 
+        X: array of shape (d, n)
+        k: number of clusters
+        returns: centroids C (d×k), and labels (n,)
+        """
+        # init centroids by choosing k random points from X
+        C = X[:, np.random.choice(X.shape[1], k, replace=False)]
+
+        for i in range(max_iters):
+            dlist = []
+            for c in C.T:
+                Y = self.align(X, c)
+                dlist.append(np.sum((Y - c[:,None])**2, axis=0))
+            labels = (np.stack(dlist)).argmin(axis=0)
+
+            # *** determine new centroids using a frechet means solver ***
+            columns = []
+            for j in range(k):
+                if solver == 'exact':
+                    col = self.frechet(X[:, labels == j])[0]
+                elif solver == 'iterative':
+                    col = self.iterative_frechet(X[:, labels == j])[0]
+                elif solver == 'custom':
+                    col = self.custom_solver(X[:, labels == j])
+                columns.append(col)
+            new_C = np.column_stack(columns)
+
+            # check convergence using quotient dist
+            if np.sum([self.dist(C[:,i], new_C[:,i]) for i in range(k)]) < tol:
+                break
+            C = new_C
+
+        return C, labels
+    
+    def kmeans_sdp(self, X, k, solver = 'iterative'):
+        """
+        Finds the Frechet kMeans using quotient distance and the kMeans Pei-Wei SDP
+        X:       array (d × n)
+        k:       number of clusters
+
+        Returns:
+          C      – final centroids in original space (d×k)
+          labels – cluster assignments (n,)
+        (Does not return Z_opt)
+        """
+        d, n = X.shape
+
+        # Build pairwise distance matrix D (n×n) through the quotient distance
+        D = np.zeros((n, n))
+        for i in range(n):
+            for j in range(i, n):
+                D[i, j] = self.dist(X[:, i], X[:, i])
+                D[j, i] = D[i, j]
+
+        # Form “kernel” K = –D so that maximizing ⟨K, Z⟩ ≡ minimizing ⟨D, Z⟩
+        K = -D
+
+        # Set up SDP variable & constraints
+        Z = cp.Variable((n, n), symmetric=True)
+        constr = [
+            Z >> 0,                # Z ⪰ 0
+            Z >= 0,                # entrywise ≥ 0
+            Z @ np.ones(n) == 1,   # Z·1 = 1
+            cp.trace(Z) == k       # trace(Z) = k
+        ]
+
+        # Objective: max Tr(K Z)
+        prob = cp.Problem(cp.Maximize(cp.trace(K @ Z)), constr)
+        prob.solve(solver='SCS', verbose=False)
+
+        Z_opt = Z.value
+        if Z_opt is None:
+            raise RuntimeError("SDP failed to find a solution")
+
+        # Spectral rounding: embed via top-k eigenspace
+        vals, vecs = np.linalg.eigh(Z_opt)
+        topk = np.argsort(vals)[-k:]
+        U = vecs[:, topk] * np.sqrt(vals[topk])
+        U_norm = U / np.linalg.norm(U, axis=1, keepdims=True)
+        embed_labels = KMeans(n_clusters=k).fit_predict(U_norm)
+
+        ## Computing *approximate* final cluster means (does not affect clustering)
+        columns = []
+        for j in range(k):
+            if solver == 'exact':
+                col = self.frechet(X[:, embed_labels == j])[0]
+            elif solver == 'iterative':
+                col = self.iterative_frechet(X[:, embed_labels == j])[0]
+            elif solver == 'custom':
+                col = self.custom_solver(X[:, labels == j])[0]
+            columns.append(col)
+
+        C = np.column_stack(columns)
+
+        return C, embed_labels
+    
+class CustomFrechet_GroupAction(GroupAction):
+    '''
+    Same as GroupAction but requires frechet_solver, a custom function that takes a (dxn) data matrix and returns 
+        the frechet mean relative to the specified group action. Allows for group specific SDP/spectral solvers. 
+    '''
+    def __init__(self, group, dim, frechet_solver, *args, **kwargs):
+        super().__init__(group, dim, *args, **kwargs)
+        self.custom_solver = frechet_solver
 
 # ─── Group matrix constructors ────────────────────────────────────────────────
 # functions that generate list of all matrices in a finite group
@@ -293,3 +405,30 @@ def sample_unif_ball(n, d, R=1, y=None):
     # Scale directions by distances and add the center point y
     points = y + directions * distances
     return points
+
+# goemans-williamson SDP used for SDP computation of +-Id Frechet mean
+def GW_SDP(X):
+    ############ ChatGPT coded
+    N = X.shape[1]
+
+    # Define the variable Z as a p by p matrix
+    Z = cp.Variable((N, N), symmetric=True)
+
+    # Define the objective: maximize <X^T X, Z>
+    objective = cp.Maximize(cp.trace((X.T @ X) @ Z))
+
+    # Define the constraints: Z is positive semidefinite and diagonal is all ones
+    constraints = [Z >> 0,  # Z is positive semidefinite
+                   cp.diag(Z) == np.ones(N)]  # Diagonal of Z is all ones
+
+    # Define the problem
+    problem = cp.Problem(objective, constraints)
+
+    # Solve the problem
+    problem.solve()
+
+    # The optimal value of Z
+    Z_opt = Z.value
+    #############
+    
+    return Z_opt
