@@ -240,7 +240,7 @@ class GroupAction:
         D = np.zeros((n, n))
         for i in range(n):
             for j in range(i, n):
-                D[i, j] = self.dist(X[:, i], X[:, i])
+                D[i, j] = self.dist(X[:, i], X[:, j])
                 D[j, i] = D[i, j]
 
         # Form “kernel” K = –D so that maximizing ⟨K, Z⟩ ≡ minimizing ⟨D, Z⟩
