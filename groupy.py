@@ -187,7 +187,7 @@ class GroupAction:
 
         return dataset_rep
     
-    def kmeans(self, X, k, solver = 'iterative', max_iters=100, tol=1e-4):
+    def kmeans(self, X, k, init = None, solver = 'iterative', max_iters=100, tol=1e-4):
         """
         Frechet kmeans using Lloyds algorithm 
         X: array of shape (d, n)
@@ -195,7 +195,10 @@ class GroupAction:
         returns: centroids C (d×k), and labels (n,)
         """
         # init centroids by choosing k random points from X
-        C = X[:, np.random.choice(X.shape[1], k, replace=False)]
+        if init is None:
+            C = X[:, np.random.choice(X.shape[1], k, replace=False)]
+        else: 
+            C = init
 
         for i in range(max_iters):
             dlist = []
