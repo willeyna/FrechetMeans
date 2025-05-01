@@ -153,6 +153,27 @@ class GroupAction:
         '''
 
         return self.frechet_functional(x.reshape(-1,1), y)
+    
+    def dist_matrix(self, X):
+        """
+        Takes in dxn data matrix and returns the nxn quotient distance matrix 
+        Efficiently computes only the upper triangle via np broadcasting on submatrices
+        """
+        d, n = X.shape
+        GX = self.get_orbits(X)# (k, d, n)
+        D  = np.zeros((n, n))
+        lower_idx = np.tril_indices(n, -1)
+
+        for i in range(n):
+            x = X[:, i]  # shape (d,)
+            # broadcast gx_i...xj for j ≥ i in one go
+            sq_dists = np.sum((GX[:, :, i:] - x[None, :, None])**2 ,axis=1)  # shape (k, n-i)
+            D[i, i:] = np.min(sq_dists, axis=0)
+
+        # mirror upper triangle down
+        D[lower_idx] = D.T[lower_idx]
+        return D
+
 
     def is_alignable(self, X, check_aligned = False):
         '''
@@ -239,15 +260,8 @@ class GroupAction:
         """
         d, n = X.shape
 
-        # Build pairwise distance matrix D (n×n) through the quotient distance
-        D = np.zeros((n, n))
-        for i in range(n):
-            for j in range(i, n):
-                D[i, j] = self.dist(X[:, i], X[:, j])
-                D[j, i] = D[i, j]
-
-        # Form “kernel” K = –D so that maximizing ⟨K, Z⟩ ≡ minimizing ⟨D, Z⟩
-        K = -D
+        # Build pairwise kernel matrix K = -D (D dist matrix (n×n) through the quotient distance)
+        K = -self.dist_matrix(X)
 
         # Set up SDP variable & constraints
         Z = cp.Variable((n, n), symmetric=True)
