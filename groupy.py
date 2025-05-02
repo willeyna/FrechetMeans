@@ -231,18 +231,26 @@ class GroupAction:
             # *** determine new centroids using a frechet means solver ***
             columns = []
             for j in range(k):
-                if solver == 'exact':
-                    col = self.frechet(X[:, labels == j])[0]
-                elif solver == 'iterative':
-                    col = self.iterative_frechet(X[:, labels == j])[0]
-                elif solver == 'custom':
-                    col = self.custom_solver(X[:, labels == j])
+                cluster = X[:, labels == j]
+                
+                if cluster.size == 0:
+                    # Reinitialize this cluster to a random data point
+                    col = X[:, np.random.randint(X.shape[1])]
+                else:
+                    if solver == 'exact':
+                        col = self.frechet(cluster)[0]
+                    elif solver == 'iterative':
+                        col = self.iterative_frechet(cluster)[0]
+                    elif solver == 'custom':
+                        col = self.custom_solver(cluster)
+                    
                 columns.append(col)
             new_C = np.column_stack(columns)
 
             # check convergence using quotient dist
             if np.sum([self.dist(C[:,i], new_C[:,i]) for i in range(k)]) < tol:
                 break
+                
             C = new_C
 
         return C, labels
